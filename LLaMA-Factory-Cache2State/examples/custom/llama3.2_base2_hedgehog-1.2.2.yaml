@@ -1,0 +1,67 @@
+
+# llamafactory-cli train /inspire/hdd/ws-8207e9e2-e733-4eec-a475-cfa1c36480ba/embodied-multimodality/liuxiaoran-240108120089/train/LLaMA-Factory-Cache2State/examples/custom/llama3.2_base2_hedgehog-1.2.yaml
+
+model_name_or_path: /inspire/hdd/ws-8207e9e2-e733-4eec-a475-cfa1c36480ba/embodied-multimodality/liuxiaoran-240108120089/train/models/Llama-3_2-3B-fla-base2
+resume_from_checkpoint: /inspire/hdd/ws-8207e9e2-e733-4eec-a475-cfa1c36480ba/embodied-multimodality/liuxiaoran-240108120089/train/saves/llama3.2-3B-base2-hedgehog-1.2.2/checkpoint-800
+trust_remote_code: true
+
+### method
+stage: pt
+do_train: true
+# finetuning_type: full
+# finetuning_type: freeze
+finetuning_type: lora
+lora_rank: 8
+lora_alpha: 8
+
+# lora_target: q_proj, k_proj, v_proj
+lora_target: layers.2.self_attn.q_proj,layers.2.self_attn.k_proj,layers.2.self_attn.v_proj,layers.3.self_attn.q_proj,layers.3.self_attn.k_proj,layers.3.self_attn.v_proj,layers.4.self_attn.q_proj,layers.4.self_attn.k_proj,layers.4.self_attn.v_proj,layers.5.self_attn.q_proj,layers.5.self_attn.k_proj,layers.5.self_attn.v_proj,layers.6.self_attn.q_proj,layers.6.self_attn.k_proj,layers.6.self_attn.v_proj,layers.7.self_attn.q_proj,layers.7.self_attn.k_proj,layers.7.self_attn.v_proj,layers.8.self_attn.q_proj,layers.8.self_attn.k_proj,layers.8.self_attn.v_proj,layers.9.self_attn.q_proj,layers.9.self_attn.k_proj,layers.9.self_attn.v_proj,layers.10.self_attn.q_proj,layers.10.self_attn.k_proj,layers.10.self_attn.v_proj,layers.11.self_attn.q_proj,layers.11.self_attn.k_proj,layers.11.self_attn.v_proj,layers.12.self_attn.q_proj,layers.12.self_attn.k_proj,layers.12.self_attn.v_proj,layers.13.self_attn.q_proj,layers.13.self_attn.k_proj,layers.13.self_attn.v_proj,layers.14.self_attn.q_proj,layers.14.self_attn.k_proj,layers.14.self_attn.v_proj,layers.15.self_attn.q_proj,layers.15.self_attn.k_proj,layers.15.self_attn.v_proj,layers.16.self_attn.q_proj,layers.16.self_attn.k_proj,layers.16.self_attn.v_proj,layers.17.self_attn.q_proj,layers.17.self_attn.k_proj,layers.17.self_attn.v_proj,layers.18.self_attn.q_proj,layers.18.self_attn.k_proj,layers.18.self_attn.v_proj,layers.19.self_attn.q_proj,layers.19.self_attn.k_proj,layers.19.self_attn.v_proj,layers.20.self_attn.q_proj,layers.20.self_attn.k_proj,layers.20.self_attn.v_proj,layers.21.self_attn.q_proj,layers.21.self_attn.k_proj,layers.21.self_attn.v_proj,layers.22.self_attn.q_proj,layers.22.self_attn.k_proj,layers.22.self_attn.v_proj,layers.23.self_attn.q_proj,layers.23.self_attn.k_proj,layers.23.self_attn.v_proj,layers.24.self_attn.q_proj,layers.24.self_attn.k_proj,layers.24.self_attn.v_proj,layers.25.self_attn.q_proj,layers.25.self_attn.k_proj,layers.25.self_attn.v_proj,layers.26.self_attn.q_proj,layers.26.self_attn.k_proj,layers.26.self_attn.v_proj,layers.27.self_attn.q_proj,layers.27.self_attn.k_proj,layers.27.self_attn.v_proj
+additional_target: feature_map_q.layer,feature_map_k.layer
+
+deepspeed: examples/deepspeed/ds_z3_config.json
+# freeze_trainable_modules: layers.2.self_attn.feature_map_q.layer,layers.2.self_attn.feature_map_k.layer,layers.3.self_attn.feature_map_q.layer,layers.3.self_attn.feature_map_k.layer,layers.4.self_attn.feature_map_q.layer,layers.4.self_attn.feature_map_k.layer,layers.5.self_attn.feature_map_q.layer,layers.5.self_attn.feature_map_k.layer,layers.6.self_attn.feature_map_q.layer,layers.6.self_attn.feature_map_k.layer,layers.7.self_attn.feature_map_q.layer,layers.7.self_attn.feature_map_k.layer,layers.8.self_attn.feature_map_q.layer,layers.8.self_attn.feature_map_k.layer,layers.9.self_attn.feature_map_q.layer,layers.9.self_attn.feature_map_k.layer,layers.10.self_attn.feature_map_q.layer,layers.10.self_attn.feature_map_k.layer,layers.11.self_attn.feature_map_q.layer,layers.11.self_attn.feature_map_k.layer,layers.12.self_attn.feature_map_q.layer,layers.12.self_attn.feature_map_k.layer,layers.13.self_attn.feature_map_q.layer,layers.13.self_attn.feature_map_k.layer,layers.14.self_attn.feature_map_q.layer,layers.14.self_attn.feature_map_k.layer,layers.15.self_attn.feature_map_q.layer,layers.15.self_attn.feature_map_k.layer,layers.16.self_attn.feature_map_q.layer,layers.16.self_attn.feature_map_k.layer,layers.17.self_attn.feature_map_q.layer,layers.17.self_attn.feature_map_k.layer,layers.18.self_attn.feature_map_q.layer,layers.18.self_attn.feature_map_k.layer,layers.19.self_attn.feature_map_q.layer,layers.19.self_attn.feature_map_k.layer,layers.20.self_attn.feature_map_q.layer,layers.20.self_attn.feature_map_k.layer,layers.21.self_attn.feature_map_q.layer,layers.21.self_attn.feature_map_k.layer,layers.22.self_attn.feature_map_q.layer,layers.22.self_attn.feature_map_k.layer,layers.23.self_attn.feature_map_q.layer,layers.23.self_attn.feature_map_k.layer,layers.24.self_attn.feature_map_q.layer,layers.24.self_attn.feature_map_k.layer,layers.25.self_attn.feature_map_q.layer,layers.25.self_attn.feature_map_k.layer,layers.26.self_attn.feature_map_q.layer,layers.26.self_attn.feature_map_k.layer,layers.27.self_attn.feature_map_q.layer,layers.27.self_attn.feature_map_k.layer
+flash_attn: fa2
+
+### dataset
+dataset: LongWanjuan
+template: llama3
+cutoff_len: 32768
+# max_samples: 100000
+overwrite_cache: true
+# preprocessing_num_workers: 16
+preprocessing_num_workers: 64
+# dataloader_num_workers: 4
+dataloader_num_workers: 16
+
+### output
+output_dir: /inspire/hdd/ws-8207e9e2-e733-4eec-a475-cfa1c36480ba/embodied-multimodality/liuxiaoran-240108120089/train/saves/llama3.2-3B-base2-hedgehog-1.2.3
+
+report_to: tensorboard
+logging_dir: /inspire/hdd/ws-8207e9e2-e733-4eec-a475-cfa1c36480ba/embodied-multimodality/liuxiaoran-240108120089/train/saves/llama3.2-3B-base2-hedgehog-1.2.3/logs
+
+logging_steps: 1
+save_steps: 200
+# save_steps: 100
+plot_loss: true
+overwrite_output_dir: true
+save_only_model: true
+
+### train
+per_device_train_batch_size: 1
+gradient_accumulation_steps: 8
+learning_rate: 3.0e-4
+# learning_rate: 1.0e-4
+# learning_rate: 3.0e-5
+num_train_epochs: 1.0
+lr_scheduler_type: cosine
+warmup_ratio: 0.1
+bf16: true
+ddp_timeout: 180000000
+resume_from_checkpoint: null
+
+### eval
+# eval_dataset: c4_demo
+# val_size: 0.1
+# per_device_eval_batch_size: 1
+# eval_strategy: steps
+# eval_steps: 500

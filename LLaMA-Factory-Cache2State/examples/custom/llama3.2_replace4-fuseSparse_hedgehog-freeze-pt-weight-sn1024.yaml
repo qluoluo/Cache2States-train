@@ -1,0 +1,63 @@
+# 按照 https://fudan-nlp.feishu.cn/sheets/L2rzsjN2Rhlq4otfo3GcvH5sn0d?sheet=EDiNe4 的分数大小去选择分数最低的四层替换
+# 并且添加了注意力权重比例
+
+
+# llamafactory-cli train /inspire/hdd/ws-8207e9e2-e733-4eec-a475-cfa1c36480ba/embodied-multimodality/liuxiaoran-240108120089/train/LLaMA-Factory-Cache2State/examples/custom/llama3.2_replace4_hedgehog-freeze.yaml
+
+model_name_or_path: /inspire/hdd/ws-8207e9e2-e733-4eec-a475-cfa1c36480ba/embodied-multimodality/liuxiaoran-240108120089/train/models/Llama-3_2-3B-fla-replace4-fuseSparse-weight-sn1024
+trust_remote_code: true
+
+### method
+stage: pt
+do_train: true
+
+# finetuning_type: full
+
+finetuning_type: freeze
+freeze_trainable_modules: feature_map_q.layer,feature_map_k.layer,self_attn.balance_weight
+
+deepspeed: examples/deepspeed/ds_z3_config.json
+flash_attn: fa2
+
+### dataset
+dataset: LongWanjuan
+template: llama3
+cutoff_len: 32768
+# max_samples: 100000
+overwrite_cache: true
+# preprocessing_num_workers: 16
+preprocessing_num_workers: 64
+# dataloader_num_workers: 4
+dataloader_num_workers: 16
+
+### output
+output_dir: /inspire/hdd/ws-8207e9e2-e733-4eec-a475-cfa1c36480ba/embodied-multimodality/liuxiaoran-240108120089/train/saves/Llama-3_2-3B-fla-replace4-fuseSparse-hedgehog-freeze-pt-lr1e-3-weight-sn1024
+
+report_to: tensorboard
+logging_dir: /inspire/hdd/ws-8207e9e2-e733-4eec-a475-cfa1c36480ba/embodied-multimodality/liuxiaoran-240108120089/train/saves/Llama-3_2-3B-fla-replace4-fuseSparse-hedgehog-freeze-pt-lr1e-3-weight-sn1024/logs
+
+logging_steps: 1
+save_steps: 200
+# save_steps: 100
+plot_loss: true
+overwrite_output_dir: true
+save_only_model: false
+
+### train
+per_device_train_batch_size: 1
+gradient_accumulation_steps: 8
+# learning_rate: 8.0e-4
+learning_rate: 1.0e-3
+num_train_epochs: 1.0
+lr_scheduler_type: cosine
+warmup_ratio: 0.1
+bf16: true
+ddp_timeout: 180000000
+resume_from_checkpoint: null
+
+### eval
+# eval_dataset: c4_demo
+# val_size: 0.1
+# per_device_eval_batch_size: 1
+# eval_strategy: steps
+# eval_steps: 500

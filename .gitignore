@@ -1,0 +1,16 @@
+*.pth
+*.pt
+*.safetensors
+*.bin
+
+/opencompass_eval_result
+/data
+
+# /opencompass
+# !opencompass/myEval
+
+/models
+/saves
+
+bin/
+build/
