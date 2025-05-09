@@ -1,0 +1,304 @@
+# -*- coding: utf-8 -*-
+# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
+
+from typing import Callable, List, Optional, Tuple, Union
+from transformers.activations import ACT2FN
+from transformers.cache_utils import Cache, DynamicCache, StaticCache
+from transformers.generation import GenerationMixin
+from transformers.modeling_attn_mask_utils import AttentionMaskConverter
+from transformers.modeling_flash_attention_utils import FlashAttentionKwargs
+from transformers.processing_utils import Unpack
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from einops import rearrange, repeat
+import math
+
+from fla.modules import RMSNorm
+# from fla.modules.feature_map import DPFPFeatureMap, HadamardFeatureMap, HedgehogFeatureMap, T2RFeatureMap, PerformerFeatureMap
+from .feature_map import DPFPFeatureMap, HadamardFeatureMap, HedgehogFeatureMap, T2RFeatureMap, PerformerFeatureMap
+from fla.ops.linear_attn import chunk_linear_attn, fused_chunk_linear_attn, fused_recurrent_linear_attn
+from transformers.models.llama.modeling_llama import apply_rotary_pos_emb
+from transformers import LlamaConfig
+
+from flash_attn import flash_attn_func
+
+from einops import rearrange, repeat
+
+class LinearAttentionWithSoftmax(nn.Module):
+    def __init__(
+        self,
+        config: LlamaConfig,
+        layer_idx: int,
+        mode: str = 'chunk',
+        hidden_size: str = 1024,
+        expand_k: int = 1.0,
+        expand_v: int = 1.0,
+        num_heads: int = 8,
+        num_kv_heads: Optional[int] = None,
+        feature_map: str = 'elementwise_product',
+        tie_feature_map_qk: bool = False,
+        output_norm: str = 'rmsnorm',
+        norm_q: bool = False,
+        norm_k: bool = False,
+        do_feature_map_norm: bool = False,
+        elementwise_affine: bool = True,
+        norm_eps: float = 1e-5,
+        
+        **kwargs
+    ):
+        super().__init__()
+
+        self.hidden_size = hidden_size
+        self.mode = mode
+        self.num_heads = num_heads
+        self.num_kv_heads = num_kv_heads if num_kv_heads is not None else num_heads
+        self.num_kv_groups = self.num_heads // self.num_kv_heads
+        self.key_dim = int(hidden_size * expand_k)
+        self.value_dim = int(hidden_size * expand_v)
+        self.key_dim_per_group = self.key_dim // self.num_kv_groups
+        self.value_dim_per_group = self.value_dim // self.num_kv_groups
+
+        self.config = config
+        self.layer_idx = layer_idx
+        self.head_dim = getattr(config, "head_dim", config.hidden_size // config.num_attention_heads)
+        self.num_key_value_groups = config.num_attention_heads // config.num_key_value_heads
+        self.scaling = self.head_dim**-0.5
+        self.attention_dropout = config.attention_dropout
+        self.is_causal = True
+
+        assert mode in ['chunk', 'fused_chunk', 'fused_recurrent'], f"Not suppoerted mode `{mode}`."
+        assert self.key_dim % num_heads == 0, f"key dim must be divisible by num_heads of {num_heads}"
+        assert self.value_dim % num_heads == 0, f"value dim must be divisible by num_heads of {num_heads}"
+
+        self.head_k_dim = self.key_dim // num_heads
+        self.head_v_dim = self.value_dim // num_heads
+        self.do_feature_map_norm = do_feature_map_norm
+
+        if feature_map == 'hedgehog':
+            if tie_feature_map_qk:
+                self.feature_map_q = self.feature_map_k = HedgehogFeatureMap(head_dim=self.head_k_dim)
+            else:
+                self.feature_map_q = HedgehogFeatureMap(head_dim=self.head_k_dim)
+                self.feature_map_k = HedgehogFeatureMap(head_dim=self.head_k_dim)
+
+        elif feature_map == 't2r':
+            if tie_feature_map_qk:
+                self.feature_map_q = self.feature_map_k = T2RFeatureMap(head_dim=self.head_k_dim)
+            else:
+                self.feature_map_q = T2RFeatureMap(head_dim=self.head_k_dim)
+                self.feature_map_k = T2RFeatureMap(head_dim=self.head_k_dim)
+
+        elif feature_map == 'elementwise_product':
+            if tie_feature_map_qk:
+                self.feature_map_q = self.feature_map_k = HadamardFeatureMap(head_dim=self.head_k_dim)
+            else:
+                self.feature_map_q = HadamardFeatureMap(head_dim=self.head_k_dim)
+                self.feature_map_k = HadamardFeatureMap(head_dim=self.head_k_dim)
+
+        elif feature_map == 'dpfp':
+            self.feature_map_q = DPFPFeatureMap(head_dim=self.head_k_dim)
+            self.feature_map_k = DPFPFeatureMap(head_dim=self.head_k_dim)
+
+        elif feature_map == 'elu':
+            def elu(x):
+                return F.elu(x) + 1
+            self.feature_map_q = elu
+            self.feature_map_k = elu
+
+        elif feature_map == 'relu':
+            self.feature_map_q = nn.ReLU()
+            self.feature_map_k = nn.ReLU()
+
+        elif feature_map == 'identity':
+            self.feature_map_q = nn.Identity()
+            self.feature_map_k = nn.Identity()
+        elif feature_map == 'performer':
+            self.feature_map_q = PerformerFeatureMap(
+                head_dim=self.head_k_dim,
+                nb_features=kwargs.get('q_nb_features', 256),
+                ortho_scaling=kwargs.get('ortho_scaling', 0),
+                generalized_attention=kwargs.get('generalized_attention', False),
+                kernel_fn=kwargs.get('kernel_fn', None),
+                no_projection=kwargs.get('no_projection', False),
+                projection_register_parameter=kwargs.get('projection_register_parameter', False),
+            )
+            self.feature_map_k = PerformerFeatureMap(
+                head_dim=self.head_k_dim,
+                nb_features=kwargs.get('k_nb_features', 256),
+                ortho_scaling=kwargs.get('ortho_scaling', 0),
+                generalized_attention=kwargs.get('generalized_attention', False),
+                kernel_fn=kwargs.get('kernel_fn', None),
+                no_projection=kwargs.get('no_projection', False),
+                projection_register_parameter=kwargs.get('projection_register_parameter', False),
+            )
+        else:
+            raise NotImplementedError(f"Not supported feature map `{feature_map}`.")
+
+        self.q_proj = nn.Linear(hidden_size, self.key_dim, bias=False)
+        self.k_proj = nn.Linear(hidden_size, self.key_dim_per_group, bias=False)
+        self.v_proj = nn.Linear(hidden_size, self.value_dim_per_group, bias=False)
+
+        # if output_norm == 'rmsnorm':
+        #     self.norm = RMSNorm(hidden_size=self.head_v_dim, elementwise_affine=elementwise_affine, eps=norm_eps)
+        # elif output_norm == 'identity':
+        #     self.norm = nn.Identity()
+        # else:
+        #     raise NotImplementedError(f"Not supported output norm `{output_norm}`.")
+
+        self.o_proj = nn.Linear(self.value_dim, hidden_size, bias=False)
+
+        self.norm_q = norm_q
+        self.norm_k = norm_k
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        position_embeddings: Tuple[torch.Tensor, torch.Tensor],
+        attention_mask: Optional[torch.Tensor],
+        past_key_value: Optional[Cache] = None,
+        cache_position: Optional[torch.LongTensor] = None,
+        crucial_indices_list: Optional[List] = [],
+        **kwargs: Unpack[FlashAttentionKwargs],
+    )   -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
+        
+        ############################################################################
+        # past_key_value 处理机制
+        from transformers import DynamicCache
+        assert type(past_key_value) == DynamicCache or past_key_value is None, f"{type(past_key_value)=}"
+
+        final_state_up = None
+        final_state_down = None
+        key_cache, value_cache = None, None
+
+        if len(crucial_indices_list) > 0:
+            print(f"LinearAttention.{self.layer_idx}.forward: crucial_indices_list is not empty")
+            print(f"{crucial_indices_list=}")
+
+        if past_key_value is not None:
+            if len(past_key_value.key_cache) <= self.layer_idx:
+                past_key_value.key_cache.append([])
+                past_key_value.value_cache.append([])
+                # print(f"{self.layer_idx=} fla create new cache")
+            else:
+                final_state_up = past_key_value.key_cache[self.layer_idx]['final_state_up']
+                final_state_down = past_key_value.key_cache[self.layer_idx]['final_state_down']
+
+                key_cache = past_key_value.key_cache[self.layer_idx]['key_cache']
+                value_cache = past_key_value.key_cache[self.layer_idx]['value_cache']
+
+                # print(f"{self.layer_idx=} fla use old cache, {final_state_up.shape=}, {final_state_down.shape=}")
+        ############################################################################
+
+        mode = self.mode
+        q = self.q_proj(hidden_states)
+        k = self.k_proj(hidden_states)
+        v = self.v_proj(hidden_states)
+
+        q = rearrange(q, '... (h d) -> ... h d', d=self.head_k_dim)
+        if self.num_kv_groups > 1:
+            k = repeat(k, '... (h d) -> ... (h g) d', d=self.head_k_dim, g=self.num_kv_groups)
+            v = repeat(v, '... (h d) -> ... (h g) d', d=self.head_v_dim, g=self.num_kv_groups)
+        else:
+            k = rearrange(k, '... (h d) -> ... h d', d=self.head_k_dim)
+            v = rearrange(v, '... (h d) -> ... h d', d=self.head_v_dim)
+
+        q = q.transpose(1, 2)
+        k = k.transpose(1, 2)
+        v = v.transpose(1, 2)
+
+        cos, sin = position_embeddings
+        q, k = apply_rotary_pos_emb(q, k, cos, sin)
+
+        k_with_cache = k if key_cache is None else torch.cat([key_cache, k], dim=-2)
+        v_with_cache = v if value_cache is None else torch.cat([value_cache, v], dim=-2)
+
+        # print(f"{self.layer_idx=}, {k_with_cache.shape=}, {v_with_cache.shape=}")
+
+        # import ipdb; ipdb.set_trace()
+
+        flash_attn_output, flash_attn_softmax_lse, _ = flash_attn_func(
+                                        q.transpose(1,2),
+                                        k_with_cache.transpose(1,2),
+                                        v_with_cache.transpose(1,2),
+                                        # dropout_p = 0.0 if not self.training else self.attention_dropout,
+                                        # scaling=self.scaling,
+                                        return_attn_probs=True,
+                                    )
+        
+        # flash_attn_softmax_lse = flash_attn_softmax_lse.transpose(1,2)
+        flash_attn_output = flash_attn_output.transpose(1,2)
+        flash_attn_output_down = torch.exp(flash_attn_softmax_lse[..., None])
+        flash_attn_output_up = flash_attn_output * flash_attn_output_down
+
+        q = self.feature_map_q(q).to(q)
+        k = self.feature_map_k(k).to(k)
+
+        if self.norm_q:
+            q = q / (q.sum(-1, True) + 1e-4)
+        if self.norm_k:
+            k = k / (k.sum(-1, True) + 1e-4)
+
+        if mode == 'fused_chunk':
+            # print(f"fused chunk {q.shape=}, {k.shape=}, {v.shape=}")
+            fla_up, final_state_up = fused_chunk_linear_attn(
+                q=q,
+                k=k,
+                v=v,
+                normalize=self.do_feature_map_norm,
+                initial_state=final_state_up,
+                output_final_state=True,
+                # head_first=False,
+                head_first=True,
+            )
+
+            fla_down, final_state_down = fused_chunk_linear_attn(
+                q=q,
+                k=k,
+                # v=torch.ones((v.shape[0], v.shape[1], v.shape[2], 1)).to(q.device).to(q.dtype),
+                v=torch.ones_like(v).to(q),
+                normalize=self.do_feature_map_norm,
+                initial_state=final_state_down,
+                output_final_state=True,
+                # head_first=False,
+                head_first=True,
+            )
+            # print(f"{o.shape=}, {n.shape=}")
+            fla_down = fla_down[..., :1]
+        else:
+            raise NotImplementedError(f"Not supported mode `{mode}`.")
+        
+        # o = fla_up / fla_down
+        # print(f"{self.layer_idx=}, {fla_up.shape=}, {fla_down.shape=}, {flash_attn_output_up.shape=}, {flash_attn_output_down.shape=}")
+        o = (fla_up + flash_attn_output_up) / (fla_down + flash_attn_output_down)
+
+        # ipdb> torch.sum(fla_up)
+        # tensor(0.0398, device='cuda:0', dtype=torch.bfloat16)
+        # ipdb> torch.sum(flash_attn_output_up)
+        # tensor(757.6594, device='cuda:0')
+        # ipdb> torch.sum(fla_down)
+        # tensor(0.2656, device='cuda:0', dtype=torch.bfloat16)
+        # ipdb> torch.sum(flash_attn_output_down)
+        # tensor(2452.8862, device='cuda:0')
+
+        # print(f"fused attn {torch.sum(fla_up).item()=} {torch.sum(flash_attn_output_up).item()=} {torch.sum(fla_down).item()=} {torch.sum(flash_attn_output_down).item()=}")
+        # print(f"{fla_up.shape=} {fla_down.shape=} {flash_attn_output_up.shape=} {flash_attn_output_down.shape=}")
+
+        # import ipdb; ipdb.set_trace()
+        o = o.to(q)
+        # import ipdb; ipdb.set_trace()
+
+        if past_key_value is not None:
+            past_key_value.key_cache[self.layer_idx] = {
+                "final_state_up": final_state_up,
+                "final_state_down": final_state_down,
+                "key_cache": k_with_cache,
+                "value_cache": v_with_cache,
+            }
+
+        # import ipdb; ipdb.set_trace()
+        o = o.transpose(1, 2)
+        o = rearrange(o, '... h d -> ... (h d)')
+        o = self.o_proj(o)
+        return o, None

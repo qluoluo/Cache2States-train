@@ -9,7 +9,7 @@
 # /opencompass
 # !opencompass/myEval
 
-/models
+# /models
 /saves
 
 bin/
